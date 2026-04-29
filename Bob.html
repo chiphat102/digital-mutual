@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>Bob 的寫信與驗證台</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background-color: #fff0f5; line-height: 1.6; }
+        .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 800px; margin: auto; }
+        textarea, input[type="text"] { width: 100%; margin-bottom: 10px; padding: 8px; box-sizing: border-box; font-family: monospace; }
+        textarea { height: 60px; }
+        button { padding: 10px 15px; background-color: #008CBA; color: white; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 15px; margin-right: 5px; }
+        button:hover { background-color: #007bb5; }
+        .section { margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid #ddd; }
+        .auth-box { background-color: #eef9ee; padding: 15px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #008CBA; }
+        #log { padding: 10px; background: #eee; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; font-family: monospace; max-height: 300px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Bob 的寫信與驗證台</h2>
+        
+        <div class="section">
+            <h3>步驟 1：產生金鑰對並交換公鑰</h3>
+            <button id="generateBtn">產生 Bob 的金鑰對</button>
+            <p>1. 請將下方產生的<strong>Bob 混合公鑰</strong>複製，交給 Alice：</p>
+            <textarea id="publicKeyOutput" readonly placeholder="Bob 的公鑰會顯示在這裡..."></textarea>
+            <p>2. 請貼上 <strong>Alice 給你的混合公鑰</strong>：</p>
+            <textarea id="alicePublicKeyInput" placeholder="在此貼上 Alice 的公鑰..."></textarea>
+        </div>
+
+        <div class="section">
+            <h3>步驟 2：雙向驗證 (Mutual Authentication)</h3>
+            
+            <div class="auth-box">
+                <h4>[Alice 驗證 Bob]</h4>
+                <p>請輸入 Alice 傳來的隨機數 N_A：</p>
+                <input type="text" id="nonceAInput" placeholder="貼上 N_A...">
+                <button id="signNonceABtn">用私鑰簽署 N_A</button>
+                <p>請將下方簽章結果回傳給 Alice：</p>
+                <textarea id="signatureBOutput" readonly placeholder="Bob 的簽章結果 (Sign(N_A))..."></textarea>
+            </div>
+
+            <div class="auth-box">
+                <h4>[Bob 驗證 Alice]</h4>
+                <button id="generateNonceBBtn">產生隨機數 N_B</button>
+                <input type="text" id="nonceBOutput" readonly placeholder="產生的 N_B 會顯示在這裡 (請傳給 Alice)...">
+                <p>請輸入 Alice 回傳的簽章 Sign(N_B)：</p>
+                <textarea id="aliceSignatureInput" placeholder="貼上 Alice 的簽章..."></textarea>
+                <button id="verifyAliceBtn">驗證 Alice 的身分</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>步驟 3：製作給 Alice 的數位信封</h3>
+            <input type="text" id="messageInput" value="哈囉 Alice，這是一則無法被竊聽的機密訊息！">
+            <button id="encryptBtn">產生數位信封 (加密)</button>
+            <textarea id="envelopeOutput" readonly placeholder="加密後的數位信封會顯示在這裡..."></textarea>
+        </div>
+
+        <div class="section">
+            <h3>系統日誌：</h3>
+            <div id="log">等待操作...</div>
+        </div>
+    </div>
+
+    <script>
+        let bobSignPrivKey = null;
+        let aliceEncryptPubKey = null, aliceVerifyPubKey = null;
+
+        const logEl = document.getElementById('log');
+        function log(msg) { logEl.innerText += msg + '\n'; }
+        function clearLog() { logEl.innerText = ''; }
+        function arrayBufferToBase64(buffer) { let binary = ''; const bytes = new Uint8Array(buffer); for (let i = 0; i < bytes.byteLength; i++) { binary += String.fromCharCode(bytes[i]); } return window.btoa(binary); }
+        function base64ToArrayBuffer(base64) { const binary_string = window.atob(base64); const len = binary_string.length; const bytes = new Uint8Array(len); for (let i = 0; i < len; i++) { bytes[i] = binary_string.charCodeAt(i); } return bytes.buffer; }
+
+        document.getElementById('generateBtn').addEventListener('click', async () => {
+            clearLog(); log("正在產生 Bob 的金鑰對...");
+            try {
+                // Bob 這裡主要是為了產生簽章私鑰來回覆 Alice
+                const signKeys = await window.crypto.subtle.generateKey({ name: "RSA-PSS", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
+                bobSignPrivKey = signKeys.privateKey;
+                const signJwk = await window.crypto.subtle.exportKey("jwk", signKeys.publicKey);
+                // 為了結構一致，Bob 也產生一個包含 verifyKey 的 JSON
+                document.getElementById('publicKeyOutput').value = JSON.stringify({ verifyKey: signJwk });
+                log("✅ Bob 金鑰產生成功！");
+            } catch (e) { log("❌ 金鑰產生失敗：" + e.message); }
+        });
+
+        async function importAliceKeys() {
+            if (aliceEncryptPubKey && aliceVerifyPubKey) return true;
+            try {
+                const aliceKeys = JSON.parse(document.getElementById('alicePublicKeyInput').value);
+                aliceEncryptPubKey = await window.crypto.subtle.importKey("jwk", aliceKeys.encryptKey, { name: "RSA-OAEP", hash: "SHA-256" }, true, ["encrypt"]);
+                aliceVerifyPubKey = await window.crypto.subtle.importKey("jwk", aliceKeys.verifyKey, { name: "RSA-PSS", hash: "SHA-256" }, true, ["verify"]);
+                return true;
+            } catch (e) { log("❌ 匯入 Alice 公鑰失敗，請檢查格式！"); return false; }
+        }
+
+        document.getElementById('signNonceABtn').addEventListener('click', async () => {
+            const nonceA = document.getElementById('nonceAInput').value;
+            if (!bobSignPrivKey) { alert("請先產生金鑰對！"); return; }
+            if (!nonceA) { alert("請輸入 N_A！"); return; }
+            try {
+                const signature = await window.crypto.subtle.sign({ name: "RSA-PSS", saltLength: 32 }, bobSignPrivKey, new TextEncoder().encode(nonceA));
+                document.getElementById('signatureBOutput').value = arrayBufferToBase64(signature);
+                log("✅ 成功簽署 N_A！請回傳給 Alice。");
+            } catch (e) { log("❌ 簽章失敗：" + e.message); }
+        });
+
+        document.getElementById('generateNonceBBtn').addEventListener('click', () => {
+            const nonce = Array.from(window.crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16).padStart(2, '0')).join('');
+            document.getElementById('nonceBOutput').value = nonce;
+            log(`已產生隨機數 N_B: ${nonce}\n👉 請傳送給 Alice。`);
+        });
+
+        document.getElementById('verifyAliceBtn').addEventListener('click', async () => {
+            const nonceB = document.getElementById('nonceBOutput').value;
+            const aliceSig = document.getElementById('aliceSignatureInput').value;
+            if (!nonceB || !aliceSig) { alert("請確認 N_B 和 Alice 的簽章都已填寫！"); return; }
+            if (!(await importAliceKeys())) return;
+
+            try {
+                const isValid = await window.crypto.subtle.verify({ name: "RSA-PSS", saltLength: 32 }, aliceVerifyPubKey, base64ToArrayBuffer(aliceSig), new TextEncoder().encode(nonceB));
+                if (isValid) log("🎉 [驗證成功] 確認對方真的是 Alice！");
+                else log("🚨 [驗證失敗] 簽章無效！");
+            } catch (e) { log("❌ 驗證錯誤：" + e.message); }
+        });
+
+        document.getElementById('encryptBtn').addEventListener('click', async () => {
+            const message = document.getElementById('messageInput').value;
+            if (!message) { alert("請輸入訊息！"); return; }
+            if (!(await importAliceKeys())) return;
+
+            try {
+                const symmetricKey = await window.crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+                const iv = window.crypto.getRandomValues(new Uint8Array(12));
+                const encryptedMessage = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: iv }, symmetricKey, new TextEncoder().encode(message));
+                
+                const exportedSymmetricKey = await window.crypto.subtle.exportKey("raw", symmetricKey);
+                const encryptedSymmetricKey = await window.crypto.subtle.encrypt({ name: "RSA-OAEP" }, aliceEncryptPubKey, exportedSymmetricKey);
+
+                document.getElementById('envelopeOutput').value = JSON.stringify({
+                    encryptedMessage: arrayBufferToBase64(encryptedMessage),
+                    encryptedSymmetricKey: arrayBufferToBase64(encryptedSymmetricKey),
+                    iv: arrayBufferToBase64(iv)
+                });
+                log("\n✅ 數位信封製作完成！請傳給 Alice。");
+            } catch (e) { log("\n❌ 加密失敗：" + e.message); }
+        });
+    </script>
+</body>
+</html>
